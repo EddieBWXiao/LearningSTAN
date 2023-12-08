@@ -1,4 +1,4 @@
-RW1lr1beta_2arm = function(params,task){
+RW1lr1beta_cf = function(params,task){
   # written in R by Tim Sandhu; adapted 2023.12.8 by Eddie Xiao
   # note this is heavily based on the Hanneke den Ouden tutorial
   # http://www.hannekedenouden.ruhosting.nl/RLtutorial/html/RL_topPage.html 
@@ -12,8 +12,9 @@ RW1lr1beta_2arm = function(params,task){
   # parse input
   if(is.list(params)){
     # add input of parameters variables from parameters
-    alpha<-params$alpha
-    beta<-params$beta
+    list2env(parameters,environment()) 
+    # alpha<-parameters$alpha
+    # beta<-parameters$beta
   }else{
     alpha = params[1]
     beta = params[2]
@@ -74,10 +75,26 @@ RW1lr1beta_2arm = function(params,task){
     # increment llh of observed choices
     loglik1 = loglik1 + log(p[c]) # c here for observed choice
     
+    # core difference with no counterfactual:
+    if(sim_mode){
+      o_cf = o
+    }else{
+      #IMPROTANT: depending on the choice --> code what could have been
+      if (c == 1){
+        o_cf = c(o,!o) #the other outcome is set to 0 if 1 is received, and 1 if 0 received
+      } else if(c == 2){
+        o_cf = c(!o,o)
+      }
+      #note on possible difference from fictitious on
+      #https://github.com/CCS-Lab/hBayesDM/blob/develop/commons/stan_files/prl_fictitious.stan
+      #in fictitious, c(o,-o)? (due to hBDM coding?)
+    }
+    
     # compute prediction error based on outcome and update value
-    pe = o - v[c] # pe
-    v[c] = v[c] + alpha*pe # update value
+    pe = o_cf - v # pe
+    v = v + alpha*pe # update value; both v[1] and v[2] updated!
   }#end of loop over trials
+  
   
   # compute the likelihood: sum of logs of p(observed choice) for all trials
   # use this to find the maximum
