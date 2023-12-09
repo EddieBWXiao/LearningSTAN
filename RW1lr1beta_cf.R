@@ -12,9 +12,9 @@ RW1lr1beta_cf = function(params,task){
   # parse input
   if(is.list(params)){
     # add input of parameters variables from parameters
-    list2env(parameters,environment()) 
-    # alpha<-parameters$alpha
-    # beta<-parameters$beta
+    #list2env(params,environment()) 
+    alpha<-params$alpha
+    beta<-params$beta
   }else{
     alpha = params[1]
     beta = params[2]
