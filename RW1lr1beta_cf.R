@@ -24,6 +24,9 @@ RW1lr1beta_cf = function(params,task){
     n_trials = dim(task)[1] #row for number of trials
   }else{
     n_trials = dim(task$outcome)[1]
+    if("choice"%in% names(task)){
+      n_trials = length(task$choice)
+    }
   }
   
   outcome = task$outcome
@@ -33,6 +36,7 @@ RW1lr1beta_cf = function(params,task){
   #extract choices & see if in simulation mode
   if("choice" %in% names(task)){
     choice = task$choice
+    sim_mode=FALSE
   }else{
     sim_mode = TRUE
     choice = rep(NA,n_trials)
@@ -42,6 +46,7 @@ RW1lr1beta_cf = function(params,task){
   v0 = c(.5,.5)
   value = array(NA,c(n_trials,2)) #to store value (for both arms)
   choice_prob = array(NA,c(n_trials,2))
+  o_sim = rep(NA,n_trials)
   pchoice = rep(NA,n_trials) #to distinguish from choice_prob --> single p of making current choice
   loglik1 = 0 #a tally for log likelihood
   v = v0 # value to be updated
@@ -66,6 +71,7 @@ RW1lr1beta_cf = function(params,task){
       c = choice[t]
       o = outcome[t] #in non-simulations, outcome is the outcome received
     }
+    o_sim[t] = o
 
     # store value and choice prob 
     value[t,] = v #this is always v from the PREVIOUS trial
@@ -76,19 +82,15 @@ RW1lr1beta_cf = function(params,task){
     loglik1 = loglik1 + log(p[c]) # c here for observed choice
     
     # core difference with no counterfactual:
-    if(sim_mode){
-      o_cf = o
-    }else{
-      #IMPROTANT: depending on the choice --> code what could have been
-      if (c == 1){
-        o_cf = c(o,!o) #the other outcome is set to 0 if 1 is received, and 1 if 0 received
-      } else if(c == 2){
-        o_cf = c(!o,o)
-      }
-      #note on possible difference from fictitious on
-      #https://github.com/CCS-Lab/hBayesDM/blob/develop/commons/stan_files/prl_fictitious.stan
-      #in fictitious, c(o,-o)? (due to hBDM coding?)
+    #IMPROTANT: depending on the choice --> code what could have been
+    if (c == 1){
+      o_cf = c(o,!o) #the other outcome is set to 0 if 1 is received, and 1 if 0 received
+    } else if(c == 2){
+      o_cf = c(!o,o)
     }
+    #note on possible difference from fictitious on
+    #https://github.com/CCS-Lab/hBayesDM/blob/develop/commons/stan_files/prl_fictitious.stan
+    #in fictitious, c(o,-o)? (due to hBDM coding?)
     
     # compute prediction error based on outcome and update value
     pe = o_cf - v # pe
@@ -110,6 +112,7 @@ RW1lr1beta_cf = function(params,task){
               'pchoice'=pchoice, 
               'choice'=choice,
               'choice_prob'=choice_prob,
+              'o_sim' = o_sim,
               'loglik'=loglik,
               'loglik1'=loglik1))
 }

@@ -1,0 +1,140 @@
+---
+title: "Model comparison"
+output: html_document
+---
+```{r setup, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(rstan)
+library(loo)
+library(bridgesampling)
+
+CurrentSourceWD<-dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(CurrentSourceWD)
+
+source("RW1lr1beta_2arm.R")
+source("RW1lr1beta_cf.R")
+source("sim_vis_RL2c1o.R")
+```
+
+create task:
+```{r}
+task<-list(outcome=data.frame(ref=rep(c(1,1,1,1,0,1,1,1,0,1,1,1,0,0,0,1,0,0,1,0,0),4),
+                              alt=rep(c(0,0,0,0,1,0,0,0,1,0,0,0,1,1,1,0,1,1,0,1,1),4)))
+```
+
+main goal: simulate from two participants with two different models, and fit two models (to compare)
+
+# simulate
+```{r}
+params_sim<-list(alpha=0.5,beta=3)
+
+set.seed(10)
+s1<-RW1lr1beta_2arm(params_sim,task)
+ntrials = length(s1$choice)
+d_s1 = list('T' = ntrials,#note that I had to use this, because T alone means true...
+            choice = s1$choice,
+            outcome = as.matrix(task$outcome))
+set.seed(20)
+s2<-RW1lr1beta_cf(params_sim,task)
+ntrials = length(s2$choice)
+d_s2 = list('T' = ntrials,
+            choice = s2$choice,
+            outcome = as.matrix(task$outcome))
+
+set.seed(10)
+sim_vis_RL2c1o(RW1lr1beta_2arm,params_sim,task)
+set.seed(20)
+sim_vis_RL2c1o(RW1lr1beta_2arm,params_sim,task)
+```
+
+#fit separately
+```{r}
+nIter     <- 8000
+nChains   <- 4 
+nWarmup   <- floor(nIter/2)
+nThin     <- 1
+file_2arm<-"modelSTANfiles/single_RW1lr1beta_2arm.stan"
+file_cf<-"modelSTANfiles/single_RW1lr1beta_cf.stan"
+```
+First, 2arm fitted on the 2arm participant
+```{r}
+fit_2am_s1 <- stan(file_2arm, 
+                data    = d_s1, 
+                chains  = nChains,
+                iter    = nIter,
+                warmup  = nWarmup,
+                thin    = nThin,
+                init    = "random",
+                seed    = 1450154637)
+```
+2arm fitted on the cf participant
+```{r}
+fit_2am_s2 <- stan(file_2arm, 
+                data    = d_s2, 
+                chains  = nChains,
+                iter    = nIter,
+                warmup  = nWarmup,
+                thin    = nThin,
+                init    = "random",
+                seed    = 1450154637)
+```
+Repeat for counterfactual update
+```{r}
+fit_cf_s1 <- stan(file_cf, 
+                data    = d_s1, 
+                chains  = nChains,
+                iter    = nIter,
+                warmup  = nWarmup,
+                thin    = nThin,
+                init    = "random",
+                seed    = 1450154637)
+fit_cf_s2 <- stan(file_cf, 
+                data    = d_s2, 
+                chains  = nChains,
+                iter    = nIter,
+                warmup  = nWarmup,
+                thin    = nThin,
+                init    = "random",
+                seed    = 1450154637)
+```
+
+# model comparison: bridge sampling
+http://cran.nexr.com/web/packages/bridgesampling/vignettes/bridgesampling_example_stan.html
+(This person wrote "A tutorial on bridge sampling" on Journal of Mathematical Psychology)
+```{r}
+bridge_2am_s1 <- bridge_sampler(samples = fit_2am_s1)
+bridge_cf_s1 <- bridge_sampler(samples = fit_cf_s1)
+BF_s1 <- bf(bridge_2am_s1, bridge_cf_s1)
+print(BF_s1)
+```
+
+```{r}
+bridge_2am_s2 <- bridge_sampler(samples = fit_2am_s2)
+bridge_cf_s2 <- bridge_sampler(samples = fit_cf_s2)
+BF_s2 <- bf(bridge_cf_s2, bridge_2am_s2)
+print(BF_s2)
+```
+
+# model comparison: loo
+Taken from 
+https://github.com/lei-zhang/BayesCog_Part2/blob/master/08.compare_models/_scripts/compare_models_main.R
+
+Turns out, this requires us to do generated quantities in the stan code itself
+```{r}
+LL1 <- extract_log_lik(fit_2am_s1)
+LL2 <- extract_log_lik(fit_cf_s1)
+
+rel_n_eff1 = loo::relative_eff(exp(LL1), chain_id = rep(1:nChains, each = nIter - nWarmup))
+rel_n_eff2 = loo::relative_eff(exp(LL2), chain_id = rep(1:nChains, each = nIter - nWarmup))
+
+loo1 <- loo(LL1, r_eff = rel_n_eff1)
+loo2 <- loo(LL2, r_eff = rel_n_eff2)
+loo::loo_compare(loo1, loo2) # positive difference indicates the 2nd model's predictive accuracy is higher
+```
+
+
+
+

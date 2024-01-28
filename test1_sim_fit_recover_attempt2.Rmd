@@ -1,0 +1,306 @@
+---
+title: "Sim, Fit, Recover"
+output: html_document
+---
+```{r setup, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(rstan)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+
+CurrentSourceWD<-dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(CurrentSourceWD)
+
+source("RW1lr1beta_2arm.R")
+source("RW1lr1beta_cf.R")
+source("sim_vis_RL2c1o.R")
+```
+
+```{r}
+task<-list(outcome=data.frame(ref=rep(c(1,1,1,1,0,1,1,1,0,1,1,1,0,0,0,1,0,0,1,0,0),4),
+                              alt=rep(c(0,0,0,0,1,0,0,0,1,0,0,0,1,1,1,0,1,1,0,1,1),4)))
+params<-list(alpha=0.3,beta=5)
+sim_vis_RL2c1o(RW1lr1beta_2arm,params,task)
+sim_vis_RL2c1o(RW1lr1beta_cf,params,task)
+```
+# simulate from single participant, and fit single-participant
+```{r}
+#adapting from https://github.com/CCS-Lab/hBayesDM/blob/develop/commons/stan_files/prl_fictitious.stan
+
+stanRW1lr1beta_2arm<-'
+  data {
+    int<lower=1> T;                       // number of trials
+    int<lower=-1, upper=2> choice[T];  // The choices made; 1 & 2 coding
+    matrix[T,2] outcome;                   // The outcome; I modified it...
+  }
+  
+  transformed data {
+    vector[2] initV;
+    initV = rep_vector(0.5, 2); //start at 0.5
+  }
+  
+  // Declare all parameters as vectors for vectorizing
+  parameters {
+    // Subject-specific, raw parameters
+    real alpha_pr; // learning rate
+    real beta_pr;  // inverse temperature
+  }
+  
+  transformed parameters {
+    // Transform into the bounds
+    real<lower=0, upper=1> alpha;
+    real<lower=0, upper=10> beta; //need to think: should we impose this bound??
+  
+    alpha = inv_logit(alpha_pr); //not inv_logit? may be more efficient?
+    beta  = inv_logit(beta_pr)*10; //can this cope with the bound we gave for beta??
+  }
+  
+  model {
+    // Define values
+    vector[2] ev;    // expected value
+    vector[2] prob;  // probability
+    real prob_1_;
+
+    real PE;     // prediction error
+    
+    // Individual parameters: I had to move these BELOW the vector[] and real; how did the hBayesDM code work???
+    alpha_pr  ~ normal(0, 1); //is this weakly informative??
+    beta_pr   ~ normal(0, 1); 
+
+    // Initialize values
+    ev = initV; // initial ev values
+
+    for (t in 1:T) {
+      // Compute action probabilities
+      prob[1] = 1 / (1 + exp(-(beta * (ev[1] - ev[2])))); //could there be a missing minus sign??
+      prob_1_ = prob[1];
+      prob[2] = 1 - prob_1_;
+      choice[t] ~ categorical(prob); //categorical takes in vector? and output 1 or 2
+
+      // Prediction error
+      PE   =  outcome[t,choice[t]] - ev[choice[t]];
+
+      // Value updating (learning)
+      ev[choice[t]]   += alpha * PE;
+    }
+  }
+'
+
+```
+
+```{r}
+compiled_RW1lr1beta_2arm <- stan_model(model_code = stanRW1lr1beta_2arm)
+```
+
+```{r}
+params_sim<-list(alpha=0.2,beta=1)
+
+s1_2arm<-RW1lr1beta_2arm(params_sim,task)
+ntrials = length(s1_2arm$choice)
+d_s1 = list('T' = ntrials,#okay using T is a bad, bad idea
+            choice = s1_2arm$choice,
+            outcome = as.matrix(task$outcome))
+
+fit_RW1lr1beta_2arm <- sampling(compiled_RW1lr1beta_2arm, 
+                 data = d_s1)#,
+                 #chain=4,iter = 12000, warmup = 4000)
+```
+
+```{r}
+traceplot(fit_RW1lr1beta_2arm)
+```
+
+```{r}
+alpha_posterior <- rstan::extract(fit_RW1lr1beta_2arm,pars="alpha")
+beta_posterior <- rstan::extract(fit_RW1lr1beta_2arm,pars="beta")
+hist(alpha_posterior$alpha)
+hist(beta_posterior$beta)
+mean(alpha_posterior$alpha)
+mean(beta_posterior$beta)
+```
+
+```{r}
+try1<-RW1lr1beta_2arm(list(alpha=0.4,beta=5),d_s1)
+try1$loglik
+try2<-RW1lr1beta_2arm(list(alpha=0.3,beta=5),d_s1)
+try2$loglik
+try3<-RW1lr1beta_2arm(list(alpha=0.5,beta=5),d_s1)
+try3$loglik
+```
+
+# Parameter recovery (for the simple 2arm model):
+
+```{r}
+nsims<-50
+alpha_range<-runif(nsims,0,1)
+beta_range<-rexp(nsims,1/6) #warning: rexp "rate" is not mean
+alpha_est<-rep(NA,nsims)
+beta_est<-rep(NA,nsims)
+for(i in 1:nsims){
+  params_sim<-list(alpha=alpha_range[i],beta=beta_range[i])
+
+  s1_2arm<-RW1lr1beta_2arm(params_sim,task=task)
+  ntrials = length(s1_2arm$choice)
+  d_s1 = list('T' = ntrials,#okay using T is a bad, bad idea
+              choice = s1_2arm$choice,
+              outcome = as.matrix(task$outcome))
+  
+  
+  fit_RW1lr1beta_2arm <- sampling(compiled_RW1lr1beta_2arm, 
+                 data = d_s1,
+                 chain=4,iter = 4000, warmup = 1000, #by visual inspection, I don't think iter high improved much?
+                 refresh=0)#suppress output
+  
+  alpha_posterior <- rstan::extract(fit_RW1lr1beta_2arm,pars="alpha")
+  beta_posterior <- rstan::extract(fit_RW1lr1beta_2arm,pars="beta")
+  alpha_est[i]<-mean(alpha_posterior$alpha)
+  beta_est[i]<-mean(beta_posterior$beta)
+  rm(fit_RW1lr1beta_2arm,alpha_posterior,beta_posterior,s1_2arm,d_s1)
+}
+```
+
+```{r}
+plot(alpha_range,alpha_est)+abline(coef = c(0,1))
+plot(beta_range,beta_est)+abline(coef = c(0,1))
+```
+
+
+# Parameter recovery for the counterfactual update model
+```{r}
+compiled_RW1lr1beta_cf<-stan_model(file="modelSTANfiles/single_RW1lr1beta_cf.stan")
+```
+```{r}
+nsims<-30
+alpha_range<-runif(nsims,0,1)
+beta_range<-rexp(nsims,1/6) #warning: rexp "rate" is not mean
+alpha_est<-rep(NA,nsims)
+beta_est<-rep(NA,nsims)
+for(i in 1:nsims){
+  params_sim<-list(alpha=alpha_range[i],beta=beta_range[i])
+
+  s1<-RW1lr1beta_cf(params_sim,task=task)
+  ntrials = length(s1$choice)
+  d_s1 = list('T' = ntrials,#okay using T is a bad, bad idea
+              choice = s1$choice,
+              outcome = as.matrix(task$outcome))
+  
+  
+  fit_RW1lr1beta_cf <- sampling(compiled_RW1lr1beta_cf, 
+                 data = d_s1,
+                 chain=4,iter = 4000, warmup = 1000,
+                 refresh=0)#suppress output
+  
+  alpha_posterior <- rstan::extract(fit_RW1lr1beta_cf,pars="alpha")
+  beta_posterior <- rstan::extract(fit_RW1lr1beta_cf,pars="beta")
+  alpha_est[i]<-mean(alpha_posterior$alpha)
+  beta_est[i]<-mean(beta_posterior$beta)
+  rm(fit_RW1lr1beta_cf,alpha_posterior,beta_posterior,s1,d_s1)
+}
+```
+
+```{r}
+plot(alpha_range,alpha_est)+abline(coef = c(0,1))
+plot(beta_range,beta_est)+abline(coef = c(0,1))
+```
+
+## Meanwhile with maximum likelihood estimation
+```{R}
+
+```
+
+# cmdstanr: an alternative
+https://mc-stan.org/cmdstanr/articles/cmdstanr.html
+```{r}
+file <- file.path('modelSTANfiles/single_RW1lr1beta_2arm.stan')
+mod <- cmdstan_model(file)
+```
+
+```{r}
+mod$print()
+```
+```{r}
+fit <- mod$sample(
+  data = d_s1,
+  seed = 123,
+  chains = 4,
+  parallel_chains = 4,
+  refresh = 500 # print update every 500 iters
+)
+```
+```{r}
+fit$summary()
+fit$summary(
+  variables = NULL,
+  posterior::default_summary_measures(),
+  extra_quantiles = ~posterior::quantile2(., probs = c(.0275, .975))
+)
+draws_df <- fit$draws(format = "df")
+mean(draws_df$alpha)
+mean(draws_df$beta)
+```
+```{r}
+mcmc_hist(fit$draws("alpha"))+
+  vline_at(params_sim$alpha, size = 1.5)
+mcmc_hist(fit$draws("beta"))+
+  vline_at(params_sim$beta, size = 1.5)
+```
+We can also do other approximations
+```{r}
+# fit_laplace <- mod$laplace(
+#     mode = fit_map,
+#     draws = 4000,
+#     data = d_s1,
+#     seed = 123,
+#     refresh = 1000
+#   )
+# mcmc_hist(fit_laplace$draws("alpha"), binwidth = 0.025)
+
+# fit_mle <- mod$optimize(data = d_s1, seed = 123)
+
+# somehow only available in cmdstan >= 2.32
+```
+
+
+# Parameter recovery for cmdstanr
+
+```{r}
+nsims<-30
+alpha_range<-runif(nsims,0,1)
+beta_range<-rexp(nsims,1/6) #warning: rexp "rate" is not mean
+alpha_est<-rep(NA,nsims)
+beta_est<-rep(NA,nsims)
+for(i in 1:nsims){
+  #again, simulate
+  params_sim<-list(alpha=alpha_range[i],beta=beta_range[i])
+
+  s1_2arm<-RW1lr1beta_2arm(params_sim,task=task)
+  ntrials = length(s1_2arm$choice)
+  d_s1 = list('T' = ntrials,#okay using T is a bad, bad idea
+              choice = s1_2arm$choice,
+              outcome = as.matrix(task$outcome))
+  
+  #fit here
+  fit_RW1lr1beta_2arm <- mod$sample(
+        data = d_s1,
+        seed = 123,
+        chains = 4,
+        parallel_chains = 4,
+        refresh = 0 # supress output
+      )
+  
+  fitSum<-fit_RW1lr1beta_2arm$summary()
+  alpha_est[i]<-fitSum$mean[fitSum$variable=="alpha"]
+  beta_est[i]<-fitSum$mean[fitSum$variable=="beta"]
+  rm(fit_RW1lr1beta_2arm,s1_2arm,d_s1)
+}
+```
+
+```{r}
+plot(alpha_range,alpha_est)+abline(coef = c(0,1))
+plot(beta_range,beta_est)+abline(coef = c(0,1))
+
+```

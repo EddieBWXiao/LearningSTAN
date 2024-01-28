@@ -1,0 +1,129 @@
+---
+title: "Sim, Fit, Recover"
+output: html_document
+---
+```{r setup, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(rstan)
+
+CurrentSourceWD<-dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(CurrentSourceWD)
+
+source("RW1lr1beta_2arm.R")
+source("RW1lr1beta_cf.R")
+source("sim_vis_RL2c1o.R")
+```
+
+```{r}
+task<-list(outcome=data.frame(ref=rep(c(1,1,1,1,0,1,1,1,0,1,1,1,0,0,0,1,0,0,1,0,0),4),
+                              alt=rep(c(0,0,0,0,1,0,0,0,1,0,0,0,1,1,1,0,1,1,0,1,1),4)))
+params<-list(alpha=0.3,beta=5)
+sim_vis_RL2c1o(RW1lr1beta_2arm,params,task)
+sim_vis_RL2c1o(RW1lr1beta_cf,params,task)
+```
+# simulate from single participant, and fit single-participant
+```{r}
+#adapting from https://github.com/CCS-Lab/hBayesDM/blob/develop/commons/stan_files/prl_fictitious.stan
+
+stanRW1lr1beta_cf<-'
+  data {
+    int<lower=1> T;                       // number of trials
+    int<lower=-1, upper=2> choice[T];  // The choices made; 1 & 2 coding
+    real outcome[T];                   // The outcome
+  }
+  
+  transformed data {
+    vector[2] initV;
+    initV = rep_vector(0.5, 2); //start at 0.5
+  }
+  
+  // Declare all parameters as vectors for vectorizing
+  parameters {
+    // Subject-specific, raw parameters
+    real alpha_pr; // learning rate
+    real beta_pr;  // inverse temperature
+  }
+  
+  transformed parameters {
+    // Transform into the bounds
+    real<lower=0, upper=1> alpha;
+    real<lower=0, upper=10> beta; //need to think: should we impose this bound??
+  
+    alpha = inv_logit(alpha_pr); //not inv_logit? may be more efficient?
+    beta  = inv_logit(beta_pr)*10; //can this cope with the bound we gave for beta??
+  }
+  
+  model {
+    // Define values
+    vector[2] ev;    // expected value
+    vector[2] prob;  // probability
+    real prob_1_;
+
+    real PE;     // prediction error
+    real PEnc;   // fictitious prediction error (PE-non-chosen)
+    
+    // Individual parameters: I had to move these BELOW the vector[] and real; how did the hBayesDM code work???
+    alpha_pr  ~ normal(0, 1); //is this weakly informative??
+    beta_pr   ~ normal(0, 1); 
+
+    // Initialize values
+    ev = initV; // initial ev values
+
+    for (t in 1:T) {
+      // Compute action probabilities
+      prob[1] = 1 / (1 + exp(beta * (ev[1] - ev[2])));
+      prob_1_ = prob[1];
+      prob[2] = 1 - prob_1_;
+      choice[t] ~ categorical(prob); //categorical takes in vectors??
+
+      // Prediction error
+      PE   =  outcome[t] - ev[choice[t]];
+      PEnc = (1-outcome[t]) - ev[3-choice[t]]; //if 2 chosen, 1 unchosen
+
+      // Value updating (learning)
+      ev[choice[t]]   += alpha * PE;
+      ev[3-choice[t]] += alpha * PEnc;
+    }
+  }
+'
+```
+
+```{r}
+compiled_RW1lr1beta_cf <- stan_model(model_code = stanRW1lr1beta_cf)
+```
+
+```{r}
+params_sim<-list(alpha=0.4,beta=5)
+
+s1_cf<-RW1lr1beta_cf(params_sim,task)
+ntrials = length(s1_cf$choice)
+d_s1 = list('T' = ntrials,#okay using T is a bad, bad idea!!!
+            choice = s1_cf$choice,
+            outcome = s1_cf$o_sim)
+
+fit_RW1lr1beta_cf <- sampling(compiled_RW1lr1beta_cf, 
+                 data = d_s1)#,
+                 #chain=4,iter = 12000, warmup = 4000)
+```
+
+```{r}
+traceplot(fit_RW1lr1beta_cf)
+```
+```{r}
+alpha_posterior <- rstan::extract(fit_RW1lr1beta_cf,pars="alpha")
+beta_posterior <- rstan::extract(fit_RW1lr1beta_cf,pars="beta")
+mean(alpha_posterior$alpha)
+mean(beta_posterior$beta)
+```
+
+```{r}
+try1<-RW1lr1beta_cf(list(alpha=0.4,beta=5),d_s1)
+try1$loglik
+try2<-RW1lr1beta_cf(list(alpha=0.3,beta=5),d_s1)
+try2$loglik
+try3<-RW1lr1beta_cf(list(alpha=0.5,beta=5),d_s1)
+try3$loglik
+```
